@@ -70,22 +70,28 @@ class WC_Ext_Importer {
         update_post_meta($postID, '_sku', $sku);
 
         // -------------------------
-        // Fiyat
+        // Fiyat (Türk formatını doğru parse et)
         // -------------------------
         $regular = self::normalize_price($p['regular'] ?? $p['price'] ?? '');
         $sale    = self::normalize_price($p['price'] ?? '');
+
+        // Eğer regular boşsa ama price doluysa
+        if (!$regular && $sale) {
+            $regular = $sale;
+        }
 
         if ($regular) {
             update_post_meta($postID, '_regular_price', $regular);
             update_post_meta($postID, '_price', $regular);
         }
 
-        if ($sale && $sale < $regular) {
+        // İndirimli fiyat varsa
+        if ($sale && $regular && $sale < $regular) {
             update_post_meta($postID, '_sale_price', $sale);
             update_post_meta($postID, '_price', $sale);
         }
 
-        // stok
+        // Stok
         update_post_meta($postID, '_stock_status', 'instock');
         update_post_meta($postID, '_manage_stock', 'no');
 
@@ -100,14 +106,48 @@ class WC_Ext_Importer {
     }
 
     /**
-     * Fiyatları normalize eder
+     * Fiyatları normalize eder (Türk Lirası formatı: 299,90 veya 8.378,00)
      */
     private static function normalize_price($price) {
 
         if (!$price) return '';
 
-        $price = str_replace(['.', ',', ' '], ['', '.', ''], $price);
-
+        // HTML entitylerini decode et
+        $price = html_entity_decode($price, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        
+        // Para birimi sembollerini temizle (₺, TL, $, vb.)
+        $price = preg_replace('/[^\d,.\s]/', '', $price);
+        
+        // Boşlukları temizle
+        $price = trim($price);
+        
+        // Türk formatı tespiti
+        // Örnek: 299,90 veya 8.378,00
+        
+        // Nokta VE virgül varsa -> Türk formatı (nokta binlik, virgül ondalık)
+        if (strpos($price, '.') !== false && strpos($price, ',') !== false) {
+            // 8.378,00 -> 8378.00
+            $price = str_replace('.', '', $price);    // Binlikleri kaldır
+            $price = str_replace(',', '.', $price);   // Ondalık ayracını düzelt
+        }
+        // Sadece virgül varsa -> 299,90 formatı
+        elseif (strpos($price, ',') !== false) {
+            // 299,90 -> 299.90
+            $price = str_replace(',', '.', $price);
+        }
+        // Sadece nokta varsa ve 3 basamaktan fazla -> binlik ayraç olabilir
+        elseif (strpos($price, '.') !== false) {
+            $parts = explode('.', $price);
+            // Son parça 2 basamaklıysa ondalık, değilse binlik ayraç
+            if (count($parts) > 1 && strlen(end($parts)) === 2) {
+                // 299.90 -> 299.90 (zaten doğru)
+                // değişiklik yok
+            } else {
+                // 8.378 -> 8378
+                $price = str_replace('.', '', $price);
+            }
+        }
+        
         return floatval($price);
     }
 
@@ -121,15 +161,25 @@ class WC_Ext_Importer {
         require_once ABSPATH . 'wp-admin/includes/image.php';
 
         $gallery = [];
+        $firstImageSet = false;
 
         foreach ($images as $i => $url) {
 
+            // URL'yi temizle
+            $url = trim($url);
+            
+            // Boş URL'leri atla
+            if (empty($url)) continue;
+
             $tmp = download_url($url);
 
-            if (is_wp_error($tmp)) continue;
+            if (is_wp_error($tmp)) {
+                @unlink($tmp);
+                continue;
+            }
 
             $file = [
-                'name'     => basename($url),
+                'name'     => basename(parse_url($url, PHP_URL_PATH)),
                 'tmp_name' => $tmp
             ];
 
@@ -139,13 +189,17 @@ class WC_Ext_Importer {
 
             if (is_wp_error($attachID)) continue;
 
-            if ($i === 0) {
+            // İlk görseli featured image yap
+            if (!$firstImageSet) {
                 set_post_thumbnail($postID, $attachID);
+                $firstImageSet = true;
             } else {
+                // Diğerlerini galeriye ekle
                 $gallery[] = $attachID;
             }
         }
 
+        // Galeri görselleri varsa ekle
         if (!empty($gallery)) {
             update_post_meta($postID, '_product_image_gallery', implode(',', $gallery));
         }
